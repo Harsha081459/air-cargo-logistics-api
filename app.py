@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 import mysql.connector
 import os
 import hashlib
@@ -27,11 +27,11 @@ def get_db_connection():
             database=os.getenv("DB_NAME", "air_cargo"),
             autocommit=False
         )
-    except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Database connection failed: {err}")
+    except mysql.connector.Error:
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
 # ====================== JWT AUTH & RBAC ======================
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-secret-set-JWT_SECRET-in-production")
+JWT_SECRET = os.getenv("JWT_SECRET") or secrets.token_urlsafe(48)
 JWT_ALGORITHM = "HS256"
 JWT_TTL_MINUTES = int(os.getenv("JWT_TTL_MINUTES", "60"))
 PBKDF2_ITERATIONS = 100_000
@@ -89,8 +89,11 @@ def verify_jwt_token(
     """Validate the bearer token's HS256 signature and expiry."""
     try:
         payload = jwt.decode(
-            credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM]
+            credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM],
+            options={"require": ["sub", "role", "iat", "exp"]},
         )
+        if payload.get("sub") not in USERS or payload.get("role") != USERS[payload["sub"]]["role"]:
+            raise jwt.InvalidTokenError("Unknown identity or role")
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -133,14 +136,16 @@ class TokenResponse(BaseModel):
 
 
 class CargoCreate(BaseModel):
-    tracking_number: str
-    weight: float
-    cargo_type: str
-    total_cost: float
-    current_status: str
-    current_location: str
-    customer_id: str
-    flight_id: str
+    model_config = ConfigDict(str_strip_whitespace=True, allow_inf_nan=False)
+
+    tracking_number: str = Field(min_length=1, max_length=20)
+    weight: float = Field(gt=0, le=1e9)
+    cargo_type: str = Field(min_length=1, max_length=50)
+    total_cost: float = Field(ge=0, le=1e12)
+    current_status: str = Field(min_length=1, max_length=50)
+    current_location: str = Field(min_length=1, max_length=100)
+    customer_id: str = Field(min_length=1, max_length=20)
+    flight_id: str = Field(min_length=1, max_length=20)
 
 # ====================== ENDPOINTS ======================
 
@@ -246,6 +251,13 @@ def create_cargo(
     cursor = conn.cursor()
     
     try:
+        cursor.execute("""
+            UPDATE flight SET AvailableCapacity = AvailableCapacity - %s
+            WHERE FlightID = %s AND AvailableCapacity >= %s
+        """, (cargo.weight, cargo.flight_id, cargo.weight))
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Flight unavailable or insufficient capacity")
+
         # Step 1: Insert into Cargo
         cursor.execute("""
             INSERT INTO cargo (TrackingNumber, Weight, CargoType, TotalCost, CurrentStatus, CurrentLocation)
@@ -253,7 +265,7 @@ def create_cargo(
         """, (cargo.tracking_number, cargo.weight, cargo.cargo_type, cargo.total_cost, cargo.current_status, cargo.current_location))
         
         # Step 2: Create Booking mapping
-        booking_id = f"BKG-{cargo.tracking_number[-4:]}-{datetime.now().strftime('%M%S')}"
+        booking_id = f"BKG-{secrets.token_hex(8)}"
         cursor.execute("""
             INSERT INTO booking (BookingID, TrackingNumber, CustomerID, FlightID)
             VALUES (%s, %s, %s, %s)
@@ -274,9 +286,17 @@ def create_cargo(
             "booking_id": booking_id
         }
         
-    except mysql.connector.Error as err:
+    except HTTPException:
         conn.rollback()
-        raise HTTPException(status_code=400, detail=f"Transaction Failed. Rolled back: {err}")
+        raise
+    except mysql.connector.IntegrityError as err:
+        conn.rollback()
+        if err.errno == 1062:
+            raise HTTPException(status_code=409, detail="Cargo or booking already exists")
+        raise HTTPException(status_code=400, detail="Invalid customer or booking reference")
+    except mysql.connector.Error:
+        conn.rollback()
+        raise HTTPException(status_code=503, detail="Booking failed; transaction rolled back")
     finally:
         cursor.close()
         conn.close()

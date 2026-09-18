@@ -8,7 +8,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-rootpassword}
       MYSQL_DATABASE: air_cargo
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - ./schema.sql:/docker-entrypoint-initdb.d/1_schema.sql
       - ./seed.sql:/docker-entrypoint-initdb.d/2_seed.sql
@@ -21,12 +21,22 @@ services:
     build: .
     container_name: aircargo_api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - DB_HOST=db
       - DB_USER=root
       - DB_PASSWORD=${DB_PASSWORD:-rootpassword}
       - DB_NAME=air_cargo
+      - JWT_SECRET=${JWT_SECRET:-}
+      - JWT_TTL_MINUTES=${JWT_TTL_MINUTES:-60}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - AGENT_PASSWORD=${AGENT_PASSWORD:-agent123}
+      - VIEWER_PASSWORD=${VIEWER_PASSWORD:-viewer123}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
     depends_on:
       db:
         condition: service_healthy

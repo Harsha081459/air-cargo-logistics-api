@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/Harsha081459/air-cargo-logistics-api/actions/workflows/ci.yml/badge.svg)
 
-A robust, production-ready logistics database engine and REST API serving a normalized MySQL schema. This system tracks complex supply chain networks with strict ACID transaction management and JWT-based role-based access control.
+A local-demo logistics REST API backed by a five-table MySQL schema. Agents book cargo onto flights and retrieve shipment details; viewers have read-only access. Booking reserves capacity and inserts cargo, booking and initial tracking history in one InnoDB transaction. This is a coursework prototype, not a production-certified service.
 
 *Project period: Built Apr–May 2025 (DBMS course project); published to GitHub Sep 2026.*
 
@@ -27,7 +27,7 @@ Five tables in the `air_cargo` database (`schema.sql`):
 
 ## ✨ Key Features
 
-1. **ACID-Compliant Transactions**: Handles multi-table inserts (Cargo, Booking, Tracking History) with `conn.commit()` and `conn.rollback()` to ensure zero data corruption during logistics updates.
+1. **Atomic bookings**: A conditional capacity update prevents oversubscription; capacity and all three inserts commit together or roll back. Invalid weights, negative prices and oversized fields are rejected before database access.
 2. **Referential Integrity**: Implements strict `ON DELETE CASCADE` foreign key constraints across a normalized 5-table schema.
 3. **Complex JOINs**: Real-time aggregation of cargo status, customer data, and flight manifests via normalized query mapping.
 4. **REST API**: Exposes core functionality via `/cargo`, `/shipments/{id}` and `/flights` endpoints.
@@ -40,7 +40,7 @@ The entire application is containerized. You can spin up both the FastAPI web se
 ```bash
 git clone https://github.com/Harsha081459/air-cargo-logistics-api.git
 cd air-cargo-logistics-api
-docker-compose up --build -d
+docker compose up --build -d --wait
 ```
 
 Once running:
@@ -82,6 +82,18 @@ curl http://localhost:8000/flights -H "Authorization: Bearer <access_token>"
 
 In Swagger UI, click **Authorize** and paste the `access_token`.
 
+**3. Book and track a shipment**
+
+Use `POST /cargo` in Swagger with the following body. `CUST001` and `FL-101` are installed by `seed.sql`:
+
+```json
+{"tracking_number":"DEMO-0001","weight":12.5,"cargo_type":"General","total_cost":100,"current_status":"Booked","current_location":"JFK","customer_id":"CUST001","flight_id":"FL-101"}
+```
+
+Expect HTTP 201 with a booking ID, then call `GET /shipments/DEMO-0001` to see the customer/flight join. `/flights` now shows 12.5 less available capacity. Repeating the same request returns 409 without consuming more capacity; an unknown customer returns 400 and rolls back. Use a new tracking number for another booking. Flight weights/capacities are in the same demo units (kg).
+
+The Compose ports bind only to localhost. Stop the demo with `docker compose stop`. The initialization scripts run only against a new database volume. **Do not execute `schema.sql` against an existing database: it drops the project's tables.**
+
 ### Role matrix
 
 | Role | Read shipments & flights | Create cargo |
@@ -103,7 +115,7 @@ In Swagger UI, click **Authorize** and paste the `access_token`.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `JWT_SECRET` | dev placeholder | HMAC signing key — **must** be set in production |
+| `JWT_SECRET` | random per process | Set a stable secret for shared workers; otherwise restart invalidates all tokens |
 | `JWT_TTL_MINUTES` | `60` | Token lifetime |
 | `ADMIN_PASSWORD` / `AGENT_PASSWORD` / `VIEWER_PASSWORD` | `admin123` / `agent123` / `viewer123` | Demo credentials |
 
@@ -118,10 +130,12 @@ role enforcement, password storage) and needs **no running database** — it onl
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests/ -v      # or: python tests/test_auth.py
+python -m pytest tests/ -v
 ```
 
-All 10 tests pass.
+The local suite includes auth, validation, transaction boundaries and booking-ID regressions. The separate `database-integration` CI job builds Docker Compose on a fresh runner and tests real MySQL booking/readback, rollback on duplicate/invalid references, and two simultaneous bookings competing for capacity. `tests/test_database.py` is skipped unless `RUN_DB_INTEGRATION=1`; run it only against a disposable demo database (it inserts test records).
+
+Database connection settings are `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`. Compose also forwards `JWT_SECRET`, `JWT_TTL_MINUTES` and the three role passwords. Set those in a local, uncommitted `.env` for Compose; shell environment variables are used for direct Uvicorn runs.
 
 ## 🛠️ Tech Stack
 
@@ -139,7 +153,7 @@ All 10 tests pass.
 - **Demo credential store**: users are seeded in `app.py` (`USERS` dict, app.py:56)
   from `*_PASSWORD` env vars with defaults `admin123`/`agent123`/`viewer123` — not
   a `users` table.
-- **`JWT_SECRET` ships a dev default** (`app.py:34`); it must be set in production.
+- **Demo security only**: change the role passwords before any non-local use. Without an explicit `JWT_SECRET`, tokens are invalidated on process restart. There is no login throttling, TLS termination or persistent user administration.
 - **No pagination**: `GET /flights` returns `cursor.fetchall()` (`app.py:229`) —
   fine for demo data, unbounded for large tables.
 - **No migrations tool**: schema evolution is manual via `schema.sql` / `seed.sql`.

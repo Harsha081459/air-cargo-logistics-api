@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y default-libmysqlclient-dev build-essent
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install fastapi uvicorn pydantic
 
 COPY . .
 
