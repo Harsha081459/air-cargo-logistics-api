@@ -1,0 +1,5 @@
+pytest==9.1.1
+ruff==0.16.7
+# httpx is required by starlette's TestClient; >=0.28 removed the `app`
+# shortcut that fastapi 0.110 / starlette 0.36 relies on, so pin 0.27.x.
+httpx==0.27.2
